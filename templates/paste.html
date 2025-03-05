@@ -26,7 +26,7 @@
 {% endblock styles %}
 
 {% block head %}
-    <link rel="stylesheet" type="text/css" href="highlight.css" />
+    <link rel="stylesheet" type="text/css" href="{{ base_path }}/highlight.css" />
 {% endblock head %}
 
 {% block content %}<pre>{{ content|safe }}</pre>{% endblock content %}

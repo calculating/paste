@@ -2,7 +2,7 @@ use actix_web::web::Bytes;
 use linked_hash_map::LinkedHashMap;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use rand::{distributions::Alphanumeric, thread_rng, Rng, seq::SliceRandom};
 use std::cell::RefCell;
 
 pub type PasteStore = RwLock<LinkedHashMap<String, Bytes>>;
@@ -23,17 +23,29 @@ fn purge_old(entries: &mut LinkedHashMap<String, Bytes>) {
     }
 }
 
-/// Generates a 'pronounceable' random ID using gpw
+/// Generates a random ID with 2 numbers and 1 letter in random positions
 pub fn generate_id() -> String {
-    thread_local!(static KEYGEN: RefCell<gpw::PasswordGenerator> = RefCell::new(gpw::PasswordGenerator::default()));
-
-    KEYGEN.with(|k| k.borrow_mut().next()).unwrap_or_else(|| {
-        thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(6)
-            .map(char::from)
-            .collect()
-    })
+    let mut rng = thread_rng();
+    
+    // Generate 2 random digits
+    let digit1 = rng.gen_range(0..10).to_string();
+    let digit2 = rng.gen_range(0..10).to_string();
+    
+    // Generate 1 random letter (lowercase or uppercase)
+    let letter = if rng.gen_bool(0.5) {
+        // Lowercase letter
+        (rng.gen_range(b'a'..=b'z') as char).to_string()
+    } else {
+        // Uppercase letter
+        (rng.gen_range(b'A'..=b'Z') as char).to_string()
+    };
+    
+    // Create the characters and shuffle them
+    let mut chars = vec![digit1, digit2, letter];
+    chars.shuffle(&mut rng);
+    
+    // Join the characters into a single string
+    chars.join("")
 }
 
 /// Stores a paste under the given id

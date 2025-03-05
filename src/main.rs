@@ -30,10 +30,9 @@ use syntect::html::{css_for_theme_with_class_style, ClassStyle};
 #[derive(argh::FromArgs, Clone)]
 /// a pastebin.
 pub struct BinArgs {
-    /// socket address to bind to (default: 127.0.0.1:8820)
     #[argh(
         positional,
-        default = "SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8820)"
+        default = "SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 7278)"
     )]
     bind_addr: SocketAddr,
     /// maximum amount of pastes to store before rotating (default: 1000)
@@ -42,6 +41,9 @@ pub struct BinArgs {
     /// maximum paste size in bytes (default. 32kB)
     #[argh(option, default = "32 * 1024")]
     max_paste_size: usize,
+    /// base path for the application (default: "-")
+    #[argh(option, default = "\"-\".to_string()")]
+    base_path: String,
 }
 
 #[actix_web::main]
@@ -63,14 +65,21 @@ async fn main() -> std::io::Result<()> {
                 .app_data(store.clone())
                 .app_data(PayloadConfig::default().limit(args.max_paste_size))
                 .app_data(FormConfig::default().limit(args.max_paste_size))
+                .app_data(Data::new(args.clone()))
                 .wrap(actix_web::middleware::Compress::default())
-                .route("/", web::get().to(index))
-                .route("/", web::post().to(submit))
-                .route("/", web::put().to(submit_raw))
-                .route("/", web::head().to(HttpResponse::MethodNotAllowed))
-                .route("/highlight.css", web::get().to(highlight_css))
-                .route("/{paste}", web::get().to(show_paste))
-                .route("/{paste}", web::head().to(HttpResponse::MethodNotAllowed))
+                .service(
+                    web::scope(&format!("/{}", args.base_path.trim_start_matches('/')))
+                        .route("", web::get().to(index))
+                        .route("/", web::get().to(index))
+                        .route("", web::post().to(submit))
+                        .route("/", web::post().to(submit))
+                        .route("", web::put().to(submit_raw))
+                        .route("/", web::put().to(submit_raw))
+                        .route("", web::head().to(HttpResponse::MethodNotAllowed))
+                        .route("/highlight.css", web::get().to(highlight_css))
+                        .route("/{paste}", web::get().to(show_paste))
+                        .route("/{paste}", web::head().to(HttpResponse::MethodNotAllowed))
+                )
                 .default_service(web::to(|req: HttpRequest| async move {
                     error!("Couldn't find resource {}", req.uri());
                     HttpResponse::from_error(NotFound)
@@ -85,10 +94,22 @@ async fn main() -> std::io::Result<()> {
 
 #[derive(Template)]
 #[template(path = "index.html")]
-struct Index;
+struct Index {
+    base_path: String,
+}
 
 async fn index(req: HttpRequest) -> Result<HttpResponse, Error> {
-    render_template(&req, &Index)
+    // Get the base path from app data
+    let app_data = req.app_data::<Data<BinArgs>>().cloned();
+    let base_path = match app_data {
+        Some(data) => {
+            let path = data.base_path.clone();
+            if path.starts_with('/') { path } else { format!("/{}", path) }
+        },
+        None => "/-".to_string(),
+    };
+    
+    render_template(&req, &Index { base_path })
 }
 
 #[derive(serde::Deserialize)]
@@ -96,9 +117,20 @@ struct IndexForm {
     val: Bytes,
 }
 
-async fn submit(input: web::Form<IndexForm>, store: Data<PasteStore>) -> impl Responder {
+async fn submit(input: web::Form<IndexForm>, store: Data<PasteStore>, req: HttpRequest) -> impl Responder {
     let id = generate_id();
-    let uri = format!("/{id}");
+    
+    // Get the base path from app data
+    let app_data = req.app_data::<Data<BinArgs>>().cloned();
+    let base_path = match app_data {
+        Some(data) => {
+            let path = data.base_path.clone();
+            if path.starts_with('/') { path } else { format!("/{}", path) }
+        },
+        None => "/-".to_string(),
+    };
+    
+    let uri = format!("{base_path}/{id}");
     store_paste(&store, id, input.into_inner().val);
     HttpResponse::Found()
         .append_header((header::LOCATION, uri))
@@ -109,12 +141,24 @@ async fn submit_raw(
     data: Bytes,
     host: HostHeader,
     store: Data<PasteStore>,
+    req: HttpRequest,
 ) -> Result<String, Error> {
     let id = generate_id();
+    
+    // Get the base path from app data
+    let app_data = req.app_data::<Data<BinArgs>>().cloned();
+    let base_path = match app_data {
+        Some(data) => {
+            let path = data.base_path.clone();
+            if path.starts_with('/') { path } else { format!("/{}", path) }
+        },
+        None => "/-".to_string(),
+    };
+    
     let uri = if let Some(Ok(host)) = host.0.as_ref().map(|v| std::str::from_utf8(v.as_bytes())) {
-        format!("https://{host}/{id}\n")
+        format!("https://{host}{base_path}/{id}\n")
     } else {
-        format!("/{id}\n")
+        format!("{base_path}/{id}\n")
     };
 
     store_paste(&store, id, data);
@@ -126,6 +170,7 @@ async fn submit_raw(
 #[template(path = "paste.html")]
 struct ShowPaste<'a> {
     content: MarkupDisplay<AskamaHtml, Cow<'a, String>>,
+    base_path: String,
 }
 
 async fn show_paste(
@@ -139,6 +184,16 @@ async fn show_paste(
     let ext = splitter.next();
 
     let entry = get_paste(&store, key).ok_or(NotFound)?;
+
+    // Get the base path from app data
+    let app_data = req.app_data::<Data<BinArgs>>().cloned();
+    let base_path = match app_data {
+        Some(data) => {
+            let path = data.base_path.clone();
+            if path.starts_with('/') { path } else { format!("/{}", path) }
+        },
+        None => "/-".to_string(),
+    };
 
     if *plaintext {
         Ok(HttpResponse::Ok()
@@ -163,7 +218,7 @@ async fn show_paste(
 
         let content = MarkupDisplay::new_safe(Cow::Borrowed(&html), AskamaHtml);
 
-        render_template(&req, &ShowPaste { content })
+        render_template(&req, &ShowPaste { content, base_path })
     }
 }
 
